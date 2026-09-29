@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Claims SOP Harness</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo" aria-hidden="true">SOP</div>
+      <div>
+        <h1>Claims SOP Harness</h1>
+        <p class="sub">Insurance claims support agent: strict where the SOP demands it, flexible where reasoning helps.</p>
+      </div>
+    </div>
+    <div class="meta">
+      <span class="badge" id="model-badge" title="Model used for understanding and replies">model</span>
+      <span class="badge" id="date-badge" title="Date used for deadline checks">as of</span>
+      <button class="btn" id="new-chat" type="button">New chat</button>
+    </div>
+  </header>
+
+  <div class="banner" id="banner" hidden></div>
+
+  <main class="layout">
+    <section class="chat-col" aria-label="Conversation">
+      <div class="scenarios">
+        <span class="label">Scenarios</span>
+        <div class="chips" id="scenarios"></div>
+      </div>
+      <div class="chat" id="chat" aria-live="polite"></div>
+      <form class="composer" id="composer">
+        <textarea id="input" rows="1" placeholder="Type as the caller... (Enter to send, Shift+Enter for a new line)" autocomplete="off"></textarea>
+        <button class="btn primary" id="send" type="submit">Send</button>
+      </form>
+    </section>
+
+    <aside class="ops-col" aria-label="Operator view">
+      <div class="ops-head">
+        <h2>Operator view</h2>
+        <span class="hint">What the harness decided and why. The caller would not see this.</span>
+      </div>
+      <section class="card" id="phase-card"></section>
+      <section class="card" id="identity-card"></section>
+      <section class="card" id="memory-card"></section>
+      <section class="card" id="case-card"></section>
+      <section class="card" id="policy-card"></section>
+      <section class="card" id="effects-card"></section>
+      <section class="card" id="events-card"></section>
+    </aside>
+  </main>
+
+  <div class="overlay" id="passcode-overlay" hidden>
+    <form class="dialog" id="passcode-form">
+      <h2>Demo passcode</h2>
+      <p>This demo is protected. Enter the passcode you were given.</p>
+      <input id="passcode-input" type="password" autocomplete="current-password" required>
+      <p class="error" id="passcode-error" hidden>That passcode didn't work. Try again.</p>
+      <button class="btn primary" type="submit">Continue</button>
+    </form>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
