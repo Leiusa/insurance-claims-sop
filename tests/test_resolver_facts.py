@@ -46,6 +46,7 @@ def test_fact_sheet_past_deadline(repo):
     texts = [f["guidance"] for f in sheet["guidance"]["followup_topics"]]
     assert texts and all("{" not in t for t in texts)
     assert all("CL-2048" in t for t in texts)
+    assert not any("within a week" in t for t in texts)  # conflicting generic guidance removed
     assert amounts_in_sheet(sheet) == {"0.00", "1450.00"}
 
 
@@ -53,6 +54,7 @@ def test_fact_sheet_before_deadline(repo):
     sheet = build_fact_sheet(repo.claim("CL-2048"), repo, date(2026, 3, 1))
     assert sheet["derived"]["appeal_deadline_passed"] is False
     assert sheet["derived"]["days_until_deadline"] == 17
+    assert any(f["topic"] == "submission_timing" for f in sheet["guidance"]["followup_topics"])
 
 
 def test_unmapped_document_falls_back_to_default_alternatives(repo):

@@ -112,14 +112,20 @@ def build_fact_sheet(claim: Claim, repo: FixtureRepo, today: date) -> dict[str, 
             }
         )
 
+    deadline = deadline_facts(claim, today)
+    deadline_passed = bool(deadline and deadline["appeal_deadline_passed"])
+
     followups = []
     for item in g.get("claim_followup_guidance", []):
         if item.get("requires_documents") and not docs:
             continue
+        if item["topic"] == "submission_timing" and deadline_passed:
+            # Code resolves the conflict: generic "within a week" guidance no longer applies
+            # once the recorded deadline has passed, so the model never sees it (timing_note covers timing).
+            continue
         followups.append({"topic": item["topic"], "guidance": item["en"].format_map(fill)})
 
     derived: dict[str, Any] = {}
-    deadline = deadline_facts(claim, today)
     if deadline:
         derived.update(deadline)
     if claim.net_pay is not None:
