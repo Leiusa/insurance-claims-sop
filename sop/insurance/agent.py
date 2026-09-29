@@ -418,11 +418,13 @@ class InsuranceAgent:
             return
         if session.caller_role == "representative":
             return self._verify_representative(session, nlu, plan)
-        if nlu.asks_why or nlu.pushback_on_gate:
-            plan.add("explain_verification")
+        marker = len(plan.items)
         self._count_pushback(session, nlu, plan)
         result = self._match_factors(session, nlu, plan, whose="theirs")
         if result is None:
+            if nlu.asks_why or nlu.pushback_on_gate:
+                # Explaining why verification is needed only helps while the caller still has to verify.
+                plan.items.insert(marker, ("explain_verification", {}))
             return
         ident = session.identity
         holder = self.repo.policyholder(result.party_id)

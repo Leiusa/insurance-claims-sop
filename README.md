@@ -9,7 +9,7 @@ The **harness** controls phase order, safety gates, data access and side effects
 
 ## Quick start
 
-You need an OpenAI or Anthropic API key. The provider is detected from the key: `sk-ant-…` means Anthropic, anything else means OpenAI.
+You need an OpenAI or Anthropic API key. The provider is detected from the key: `sk-ant-…` means Anthropic, anything else means OpenAI. End-to-end testing used OpenAI; see Limitations for Anthropic.
 
 **Docker**
 
@@ -152,6 +152,7 @@ tests/
 
 ## Limitations and next steps
 
+- **Anthropic adapter.** Everything was tested end-to-end with OpenAI (`gpt-5.4-mini`). The Anthropic adapter follows the official SDK documentation (structured output via `output_config.format`, server-side refusal fallback), but it hasn't been run against the live Anthropic API.
 - **Consent.** Policyholder consent is simulated and checked once per caller turn. A real system would push a request to the policyholder and wait on a callback.
 - **Sessions.** They live in memory in a single process. Production would need a shared store.
 - **Side effects.** Email and handoff are simulated adapters behind the same tool gateway.

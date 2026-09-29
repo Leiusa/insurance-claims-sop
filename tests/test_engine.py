@@ -126,6 +126,18 @@ def test_refusing_ssn_still_allows_other_factors(agent):
     assert s.identity.verified_via == ["dob", "full_name", "phone"]
 
 
+def test_verification_is_explained_only_while_still_needed(agent):
+    explanation = "why identity verification comes first"
+    # Verified in the same turn: explaining why verification is needed would be noise.
+    s = agent.new_session()
+    prompt = say(agent, s, nlu(identity=MARGARET, asks_why=True, case_hints={"status": "denied"}))
+    assert s.identity.verified_party_id == "P9" and explanation not in prompt
+    # Still verifying: the explanation comes before the request for details.
+    s = agent.new_session()
+    prompt = say(agent, s, nlu(identity={"full_name": "Margaret Chen"}, asks_why=True))
+    assert explanation in prompt and prompt.index(explanation) < prompt.index("more detail(s) to verify")
+
+
 def test_repeated_out_of_scope_offers_human(agent):
     s = agent.new_session()
     for _ in range(3):
