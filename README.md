@@ -4,7 +4,7 @@ A text-chat support agent for insurance claims. It follows a fixed SOP, `VERIFY_
 
 The **harness** controls phase order, safety gates, data access and side effects. The **model** understands the caller and phrases the replies. How much freedom the model gets depends on the phase: strict where the SOP demands it, open where reasoning helps.
 
-- **Live demo:** _URL added after deployment_ (the passcode is provided separately)
+- **Live demo:** https://claims-sop-harness.onrender.com (the passcode is provided separately; on the free plan, the first load after 15 idle minutes can take about a minute)
 - **Design notes:** [DESIGN.md](DESIGN.md)
 
 ## Quick start
