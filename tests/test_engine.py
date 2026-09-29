@@ -209,12 +209,51 @@ def test_human_request_creates_handoff(agent):
     assert s.phase == "ESCALATED" and s.handoff["identity_verified"] is False
 
 
-def test_representative_gets_no_disclosure(agent):
+DAVID = {"caller_role": "representative", "representative_name": "David Chen", "representative_relationship": "son"}
+
+
+def test_representative_gets_access_only_after_consent(agent):
+    s = agent.new_session(consent_scenario="default")
+    prompt = say(agent, s, nlu(identity=MARGARET, case_hints={"status": "denied"}, **DAVID))
+    # Account located and representative on file, but nothing is disclosed while consent is pending.
+    assert s.phase == "VERIFY_ID" and s.identity.verified_party_id is None and s.consent.status == "pending"
+    assert {"account_located", "representative_on_file", "consent_requested"} <= set(kinds(s))
+    for secret in ("CL-2048", "pathology", "1450", "margaret@email.com"):
+        assert secret not in prompt
+    say(agent, s, nlu(scope="smalltalk"))
+    assert s.consent.status == "approved" and s.identity.verified_party_id == "P9"
+    assert s.caller_role == "representative" and s.active_case_id == "CL-2048"
+    assert s.caller_name is None  # the representative is not addressed by the policyholder's name
+
+
+def test_consent_timeout_discloses_nothing(agent):
+    s = agent.new_session(consent_scenario="timeout")
+    say(agent, s, nlu(identity=MARGARET, **DAVID))
+    say(agent, s, nlu(scope="smalltalk"))
+    prompt = say(agent, s, nlu(scope="smalltalk", pushback_on_gate=True))
+    assert s.consent.status == "timeout" and s.consent.checks == 3
+    assert s.identity.verified_party_id is None and s.phase == "VERIFY_ID"
+    assert "CL-2048" not in prompt and "human_offered" in kinds(s)
+
+
+def test_unlisted_representative_is_refused_without_consent_request(agent):
     s = agent.new_session()
-    prompt = say(
-        agent,
-        s,
-        nlu(caller_role="representative", representative_name="David Chen", representative_relationship="son", identity=MARGARET),
-    )
-    assert s.phase == "VERIFY_ID" and s.identity.verified_party_id is None
-    assert "CL-2048" not in prompt and "third_party_caller" in kinds(s)
+    say(agent, s, nlu(identity=MARGARET, caller_role="representative", representative_name="Kevin Lee"))
+    assert s.consent.status == "not_on_file" and "consent_requested" not in kinds(s)
+    assert s.identity.verified_party_id is None
+
+
+def test_representative_needs_their_own_name(agent):
+    s = agent.new_session()
+    prompt = say(agent, s, nlu(identity=MARGARET, caller_role="representative"))
+    assert s.consent.account_party_id == "P9" and s.consent.status is None
+    assert "their own full name" in prompt
+    say(agent, s, nlu(representative_name="David Chen"))
+    assert s.consent.status == "pending"
+
+
+def test_consent_tools_cannot_run_out_of_order(agent):
+    s = agent.new_session()
+    for tool in ("check_representative", "request_consent", "check_consent"):
+        with pytest.raises(ToolDenied):
+            agent.gateway.call(tool, s)

@@ -42,6 +42,10 @@ class MessageIn(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
 
 
+class SessionIn(BaseModel):
+    consent_scenario: str | None = None  # which consent_scenarios.json entry to simulate
+
+
 def require_passcode(x_demo_passcode: str | None = Header(default=None)) -> None:
     if settings.demo_passcode and not hmac.compare_digest(x_demo_passcode or "", settings.demo_passcode):
         raise HTTPException(status_code=401, detail="Passcode required")
@@ -78,8 +82,8 @@ def config() -> dict[str, Any]:
 
 
 @app.post("/api/sessions", dependencies=[Depends(require_passcode)])
-def create_session() -> dict[str, Any]:
-    session = agent.new_session()
+def create_session(body: SessionIn | None = None) -> dict[str, Any]:
+    session = agent.new_session(consent_scenario=body.consent_scenario if body else None)
     sessions[session.id] = session
     while len(sessions) > MAX_SESSIONS:
         old_id, _ = sessions.popitem(last=False)

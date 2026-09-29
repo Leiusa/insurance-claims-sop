@@ -36,6 +36,13 @@ const EVENT_CLASS = {
   factor_unusable: "k-warn",
   email_skipped: "k-warn",
   email_not_sent: "k-warn",
+  account_located: "k-transition",
+  representative_on_file: "k-good",
+  consent_approved: "k-good",
+  consent_requested: "k-warn",
+  consent_checked: "k-warn",
+  consent_timeout: "k-bad",
+  representative_not_on_file: "k-bad",
 };
 
 // ---------------------------------------------------------------- DOM helpers
@@ -188,8 +195,11 @@ function setBusy(busy) {
   });
 }
 
-async function newChat() {
-  const data = await api("/api/sessions", { method: "POST" });
+async function newChat(consentScenario) {
+  const data = await api("/api/sessions", {
+    method: "POST",
+    body: JSON.stringify({ consent_scenario: consentScenario || null }),
+  });
   app.sessionId = data.session_id;
   clear($("#chat"));
   data.transcript.forEach((message) => addMessage(message.role, message.content));
@@ -224,7 +234,7 @@ async function play(scenario, chip) {
   chip.classList.add("playing");
   setBusy(false);
   try {
-    await newChat();
+    await newChat(scenario.consent_scenario);
     for (const text of scenario.messages) {
       await sleep(400);
       await send(text);
@@ -311,6 +321,15 @@ function renderIdentity(state) {
   rows.push(["Failed attempts", `${identity.failed_attempts} of ${identity.max_attempts}`]);
   rows.push(["Policy number", identity.policy_number_hint ? `${identity.policy_number_hint} (lookup hint, not a factor)` : null]);
   rows.push(["Caller role", state.caller_role]);
+  if (state.caller_role === "representative") {
+    const consent = state.consent;
+    rows.push(["Representative", `${consent.representative || "name not given"} (${consent.relationship || "relationship not given"})`]);
+    rows.push(["Account located", consent.account_located ? "yes (no access yet)" : "no"]);
+    rows.push([
+      "Policyholder consent",
+      `${consent.status || "not requested"} · check ${consent.checks} of ${consent.max_checks} · simulated: ${consent.scenario}`,
+    ]);
+  }
   card.appendChild(kv(rows));
 }
 

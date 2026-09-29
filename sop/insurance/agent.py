@@ -23,14 +23,14 @@ from ..harness.gateway import Tool, ToolDenied, ToolGateway
 from ..harness.guard import GuardPolicy, check_reply, money_values
 from ..llm.client import LLMClient, LLMError
 from . import prompts
-from .data import FixtureRepo
+from .data import FixtureRepo, Representative
 from .facts import build_fact_sheet
 from .nlu_schema import NLUResult
 from .resolver import CaseHints, match_claims
 from .sop_spec import ENDED, ESCALATED, PHASES, POST_PROCESS, PROCESS_CASE, RESOLVE_INTENT, VERIFY_ID, WORKFLOW
 from .state import MemoryItem, Session, SlotValue
 from .summary import build_summary, mask_email, render_email
-from .verifier import FACTOR_LABELS, FACTORS, REQUIRED_FACTORS, normalize, verify
+from .verifier import FACTOR_LABELS, FACTORS, REQUIRED_FACTORS, VerificationResult, names_match, normalize, verify
 
 GREETING = (
     "Hi, thanks for contacting claims support. I can help with questions about your insurance claims. "
@@ -105,8 +105,22 @@ class InsuranceAgent:
                 return "no summary prepared"
             return None
 
+        def account_located(session: Session, **_: Any) -> str | None:
+            return None if session.consent.account_party_id else "policyholder account not located"
+
+        def consent_requestable(session: Session, **_: Any) -> str | None:
+            if not session.consent.representative_on_file:
+                return "caller is not a listed representative"
+            return "consent already requested" if session.consent.status else None
+
+        def consent_pending(session: Session, **_: Any) -> str | None:
+            return None if session.consent.status == "pending" else "no pending consent request"
+
         register = self.gateway.register
         register(Tool("verify_identity", lambda s, factors: verify(factors, repo.policyholders)))
+        register(Tool("check_representative", self._check_representative, account_located))
+        register(Tool("request_consent", self._request_consent, consent_requestable))
+        register(Tool("check_consent", self._check_consent, consent_pending))
         register(Tool("list_claims", lambda s: repo.claims_for(s.identity.verified_party_id), require_verified))
         register(
             Tool(
@@ -124,6 +138,7 @@ class InsuranceAgent:
                     handoff=s.handoff,
                     repo=repo,
                     today=self.settings.today(),
+                    representative=s.representative_name if s.consent.status == "approved" else None,
                 ),
                 require_verified,
             )
@@ -149,6 +164,8 @@ class InsuranceAgent:
             "identity_verified": bool(session.identity.verified_party_id),
             "party_id": session.identity.verified_party_id,
             "caller_role": session.caller_role,
+            "representative": session.representative_name,
+            "consent_status": session.consent.status,
             "reason_for_call": session.reason_for_call,
             "active_case_id": session.active_case_id,
             "claims_discussed": list(session.discussed),
@@ -159,10 +176,43 @@ class InsuranceAgent:
         emit(session, "handoff_created", f"Handoff ticket {ticket['ticket_id']} created: {reason}")
         return ticket
 
+    def _check_representative(self, session: Session) -> Representative | None:
+        for rep in self.repo.representatives_for(session.consent.account_party_id):
+            if names_match(session.representative_name or "", rep.rep_name):
+                session.consent.representative_on_file = True
+                return rep
+        return None
+
+    def _next_consent_status(self, session: Session) -> str:
+        """Simulated policyholder response: one entry of the scenario's status_sequence per check."""
+        sequence = self.repo.consent_scenarios.get(session.consent.scenario, {}).get("status_sequence", [])
+        index = session.consent.checks
+        session.consent.checks += 1
+        if index < len(sequence):
+            return sequence[index]
+        return sequence[-1] if sequence else "pending"
+
+    def _request_consent(self, session: Session) -> str:
+        status = self._next_consent_status(session)
+        session.consent.status = "approved" if status == "approved" else "pending"
+        emit(
+            session,
+            "consent_requested",
+            f"Authorization request sent to the policyholder (simulated '{session.consent.scenario}' scenario): {status}",
+        )
+        return status
+
+    def _check_consent(self, session: Session) -> str:
+        status = self._next_consent_status(session)
+        emit(session, "consent_checked", f"Consent check {session.consent.checks}: {status}")
+        return status
+
     # ------------------------------------------------------------------ sessions and turns
 
-    def new_session(self) -> Session:
+    def new_session(self, consent_scenario: str | None = None) -> Session:
         session = Session(id=uuid.uuid4().hex[:12])
+        scenario = consent_scenario or self.settings.consent_scenario
+        session.consent.scenario = scenario if scenario in self.repo.consent_scenarios else "default"
         session.transcript.append({"role": "assistant", "content": GREETING})
         emit(session, "session_started", "Conversation started")
         return session
@@ -215,15 +265,18 @@ class InsuranceAgent:
 
     def _capture(self, session: Session, nlu: NLUResult) -> None:
         ident = session.identity
-        if nlu.caller_role != "unknown" and nlu.caller_role != session.caller_role:
+        # The caller's role is fixed once access is granted or the consent flow has started.
+        role_open = not ident.verified_party_id and session.consent.status is None
+        if role_open and nlu.caller_role != "unknown" and nlu.caller_role != session.caller_role:
             session.caller_role = nlu.caller_role
             emit(session, "caller_role", f"Caller role: {nlu.caller_role}")
         session.representative_name = nlu.representative_name or session.representative_name
         session.representative_relationship = nlu.representative_relationship or session.representative_relationship
 
         ident.unusable = []
-        # A third party's knowledge of the policyholder's details is not verification: don't collect it.
-        if not ident.verified_party_id and not ident.locked and session.caller_role != "representative":
+        # For a representative these are the policyholder's details: they locate the account, but
+        # never grant access by themselves (that also needs the representative record and consent).
+        if not ident.verified_party_id and not ident.locked and not session.consent.account_party_id:
             for factor in FACTORS:
                 raw = getattr(nlu.identity, factor)
                 if not raw:
@@ -236,7 +289,7 @@ class InsuranceAgent:
                     continue
                 previous = ident.provided.get(factor)
                 ident.provided[factor] = SlotValue(value=value, turn=session.turn)
-                if factor == "full_name":
+                if factor == "full_name" and session.caller_role != "representative":
                     session.caller_name = raw.strip()
                 if factor in ident.refused:
                     ident.refused.remove(factor)
@@ -359,45 +412,139 @@ class InsuranceAgent:
         session.pending_question = None
 
     def _verify_id(self, session: Session, nlu: NLUResult, plan: Plan, entered: bool) -> None:
-        ident = session.identity
-        max_attempts = self.settings.max_verification_attempts
-        if ident.locked:
+        if session.identity.locked:
             plan.add("verification_locked")
             self._offer_human(session, plan, "verification is locked")
             return
         if session.caller_role == "representative":
-            emit(session, "third_party_caller", "Caller is acting for someone else; nothing can be disclosed without authorization")
-            plan.add("third_party_notice", relationship=session.representative_relationship)
-            if nlu.pushback_on_gate or nlu.asks_why:
-                plan.add("explain_consent")
-            self._offer_human(session, plan, "a representative can help set up authorized access")
-            return
+            return self._verify_representative(session, nlu, plan)
         if nlu.asks_why or nlu.pushback_on_gate:
             plan.add("explain_verification")
-        if nlu.pushback_on_gate:
-            session.counters.gate_pushbacks += 1
-            limit = self.settings.max_gate_pushbacks
-            emit(session, "gate_pushback", f"Caller pushed back on verification ({session.counters.gate_pushbacks}/{limit})")
-            if session.counters.gate_pushbacks >= limit:
-                self._offer_human(session, plan, "they may prefer to verify with a person")
+        self._count_pushback(session, nlu, plan)
+        result = self._match_factors(session, nlu, plan, whose="theirs")
+        if result is None:
+            return
+        ident = session.identity
+        holder = self.repo.policyholder(result.party_id)
+        ident.verified_party_id = result.party_id
+        ident.verified_via = result.factors
+        emit(
+            session,
+            "verified",
+            "Identity verified via " + ", ".join(FACTOR_LABELS[f] for f in result.factors),
+            party_id=result.party_id,
+        )
+        plan.add("verification_success", name=session.caller_name or holder.name)
+        self._transition(session, RESOLVE_INTENT, "identity verified")
 
+    def _count_pushback(self, session: Session, nlu: NLUResult, plan: Plan) -> None:
+        if not nlu.pushback_on_gate:
+            return
+        session.counters.gate_pushbacks += 1
+        limit = self.settings.max_gate_pushbacks
+        emit(session, "gate_pushback", f"Caller pushed back on a required step ({session.counters.gate_pushbacks}/{limit})")
+        if session.counters.gate_pushbacks >= limit:
+            self._offer_human(session, plan, "they may prefer to continue with a person")
+
+    def _holder_label(self, session: Session) -> str:
+        """How to refer to the policyholder in front of a representative: by name only if the caller gave it."""
+        holder = self.repo.policyholder(session.consent.account_party_id or "")
+        return holder.name if holder and "full_name" in session.identity.verified_via else "the policyholder"
+
+    def _verify_representative(self, session: Session, nlu: NLUResult, plan: Plan) -> None:
+        """Three gates for someone calling on a policyholder's behalf: locate the account with the
+        policyholder's details, find the caller in the representative record, get the policyholder's approval."""
+        consent = session.consent
+        if not consent.explained:
+            consent.explained = True
+            emit(session, "third_party_caller", "Caller is acting for someone else: locate account → check record → get consent")
+            plan.add("representative_process", relationship=session.representative_relationship)
+        if nlu.pushback_on_gate or nlu.asks_why:
+            plan.add("explain_consent")
+        self._count_pushback(session, nlu, plan)
+
+        if consent.status in ("timeout", "not_on_file"):
+            kind = "consent_timeout" if consent.status == "timeout" else "representative_not_on_file"
+            plan.add(kind, holder=self._holder_label(session))
+            self._offer_human(session, plan, "a representative can help with authorized access")
+            return
+        if consent.status == "pending":
+            if self.gateway.call("check_consent", session) == "approved":
+                return self._grant_representative(session, plan)
+            if consent.checks >= self.settings.max_consent_checks:
+                consent.status = "timeout"
+                emit(session, "consent_timeout", f"No approval after {consent.checks} checks; nothing disclosed")
+                plan.add("consent_timeout", holder=self._holder_label(session))
+                self._offer_human(session, plan, "the policyholder hasn't approved access")
+                return
+            plan.add("consent_pending", holder=self._holder_label(session))
+            session.pending_question = "consent_pending"
+            return
+
+        # Gate 1: locate the account. This alone gives no access.
+        if not consent.account_party_id:
+            result = self._match_factors(session, nlu, plan, whose="the policyholder's")
+            if result is None:
+                if not session.representative_name:
+                    plan.add("ask_representative_name")
+                return
+            consent.account_party_id = result.party_id
+            session.identity.verified_via = result.factors
+            emit(
+                session,
+                "account_located",
+                "Policyholder account located via "
+                + ", ".join(FACTOR_LABELS[f] for f in result.factors)
+                + "; no access until the representative is confirmed and the policyholder approves",
+                party_id=result.party_id,
+            )
+        if not session.representative_name:
+            plan.add("ask_representative_name")
+            session.pending_question = "representative_name"
+            return
+
+        # Gate 2: the caller must be on file as this policyholder's representative.
+        rep = self.gateway.call("check_representative", session)
+        if rep is None:
+            consent.status = "not_on_file"
+            emit(session, "representative_not_on_file", "Caller is not a listed representative on this account; nothing disclosed")
+            plan.add("representative_not_on_file", holder=self._holder_label(session))
+            self._offer_human(session, plan, "the policyholder can add an authorized contact")
+            return
+        emit(session, "representative_on_file", f"{rep.rep_name} is on file as the policyholder's {rep.relationship}")
+
+        # Gate 3: the policyholder approves (simulated).
+        if self.gateway.call("request_consent", session) == "approved":
+            return self._grant_representative(session, plan)
+        plan.add("consent_requested", holder=self._holder_label(session))
+        session.pending_question = "consent_pending"
+
+    def _grant_representative(self, session: Session, plan: Plan) -> None:
+        consent = session.consent
+        consent.status = "approved"
+        session.identity.verified_party_id = consent.account_party_id
+        emit(
+            session,
+            "consent_approved",
+            f"Policyholder approved access for {session.representative_name}; continuing as an authorized representative",
+            party_id=consent.account_party_id,
+        )
+        plan.add("consent_approved", holder=self._holder_label(session), representative=session.representative_name)
+        self._transition(session, RESOLVE_INTENT, "policyholder approved the representative")
+
+    def _match_factors(self, session: Session, nlu: NLUResult, plan: Plan, whose: str) -> VerificationResult | None:
+        """Check the identity details once at least 3 are in; otherwise plan to ask for more.
+
+        Returns the verified match, or None after adding what the caller should be told.
+        """
+        ident = session.identity
+        max_attempts = self.settings.max_verification_attempts
         if len(ident.provided) >= REQUIRED_FACTORS:
             result = self.gateway.call(
                 "verify_identity", session, factors={f: s.value for f, s in ident.provided.items()}
             )
             if result.status == "verified":
-                holder = self.repo.policyholder(result.party_id)
-                ident.verified_party_id = result.party_id
-                ident.verified_via = result.factors
-                emit(
-                    session,
-                    "verified",
-                    "Identity verified via " + ", ".join(FACTOR_LABELS[f] for f in result.factors),
-                    party_id=result.party_id,
-                )
-                plan.add("verification_success", name=session.caller_name or holder.name)
-                self._transition(session, RESOLVE_INTENT, "identity verified")
-                return
+                return result
             ident.failed_attempts += 1
             ident.provided = {}
             emit(
@@ -430,8 +577,10 @@ class InsuranceAgent:
             options=[FACTOR_LABELS[f] for f in available],
             unusable=[FACTOR_LABELS[f] for f in ident.unusable],
             declined=[FACTOR_LABELS[f] for f in ident.refused],
+            whose=whose,
         )
         session.pending_question = "need_identity"
+        return None
 
     def _resolve_intent(self, session: Session, nlu: NLUResult, plan: Plan, entered: bool) -> None:
         claims = self.gateway.call("list_claims", session)
@@ -556,6 +705,7 @@ class InsuranceAgent:
                 masked_email=masked,
                 preference=prefs[-1].value if prefs else None,
                 claims_discussed=bool(session.discussed),
+                owner=self._holder_label(session) if session.caller_role == "representative" else None,
             )
             session.pending_question = "email_consent"
             emit(session, "email_offered", f"Email summary offered to {masked}; waiting for send or skip")
@@ -614,9 +764,19 @@ class InsuranceAgent:
         party = ident.verified_party_id
         holder = self.repo.policyholder(party) if party else None
         if key == "identity_progress":
-            if session.caller_role == "representative":
-                return {"status": "Third-party caller. Do not collect the policyholder's details from them; authorization is required."}
             available = [f for f in FACTORS if f not in ident.provided and f not in ident.refused]
+            if session.caller_role == "representative":
+                return {
+                    "caller": "acting on behalf of the policyholder",
+                    "representative_name": session.representative_name,
+                    "policyholder_details_provided": [FACTOR_LABELS[f] for f in ident.provided],
+                    "policyholder_details_still_needed": 0
+                    if session.consent.account_party_id
+                    else max(0, REQUIRED_FACTORS - len(ident.provided)),
+                    "account_located": bool(session.consent.account_party_id),
+                    "policyholder_authorization": session.consent.status or "not requested yet",
+                    "note": "Nothing about the account or its claims may be shared until the policyholder approves.",
+                }
             return {
                 "details_provided": [FACTOR_LABELS[f] for f in ident.provided],
                 "details_still_needed": max(0, REQUIRED_FACTORS - len(ident.provided)),
@@ -632,6 +792,14 @@ class InsuranceAgent:
         if key == "verified_caller":
             if not holder:
                 return None
+            if session.caller_role == "representative":
+                relationship = session.representative_relationship or "representative"
+                return {
+                    "speaking_with": session.representative_name,
+                    "role": f"authorized representative ({relationship}) of the policyholder, approved by the policyholder",
+                    "policyholder": self._holder_label(session),
+                    "policy_number": holder.policy_number,
+                }
             return {"name_as_they_gave_it": session.caller_name or holder.name, "policy_number": holder.policy_number}
         if key == "claim_index":
             return [c.brief() for c in self.repo.claims_for(party)] if party else []
@@ -723,10 +891,20 @@ class InsuranceAgent:
                 "failed_attempts": ident.failed_attempts,
                 "max_attempts": self.settings.max_verification_attempts,
                 "verified_as": f"{holder.name} ({holder.party_id})" if holder else None,
-                "verified_via": [FACTOR_LABELS[f] for f in ident.verified_via],
+                "verified_via": [FACTOR_LABELS[f] for f in ident.verified_via]
+                + (["policyholder consent"] if session.consent.status == "approved" else []),
                 "policy_number_hint": ident.policy_number_hint,
             },
             "caller_role": session.caller_role,
+            "consent": {
+                "scenario": session.consent.scenario,
+                "status": session.consent.status,
+                "checks": session.consent.checks,
+                "max_checks": self.settings.max_consent_checks,
+                "account_located": bool(session.consent.account_party_id),
+                "representative": session.representative_name,
+                "relationship": session.representative_relationship,
+            },
             "intent": session.intent,
             "case_hints": session.case_hints.describe() if session.case_hints.any() else None,
             "memory": [m.model_dump() for m in session.memory],

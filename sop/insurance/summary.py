@@ -39,7 +39,13 @@ def mask_email(email: str | None) -> str:
 
 
 def build_summary(
-    *, party_id: str, discussed: dict[str, list[str]], handoff: dict[str, Any] | None, repo: FixtureRepo, today: date
+    *,
+    party_id: str,
+    discussed: dict[str, list[str]],
+    handoff: dict[str, Any] | None,
+    repo: FixtureRepo,
+    today: date,
+    representative: str | None = None,
 ) -> dict[str, Any]:
     holder = repo.policyholder(party_id)
     claims, next_steps = [], []
@@ -77,6 +83,7 @@ def build_summary(
         next_steps.append(f"A representative will follow up (reference {handoff['ticket_id']}).")
     return {
         "first_name": holder.first_name if holder else "there",
+        "representative": representative,
         "recipient_masked": mask_email(holder.email if holder else None),
         "claims": claims,
         "next_steps": next_steps or ["No further action is needed right now."],
@@ -85,7 +92,13 @@ def build_summary(
 
 
 def render_email(summary: dict[str, Any], *, to: str) -> dict[str, str]:
-    lines = [f"Hi {summary['first_name']},", "", "Here is a summary of your conversation with claims support today.", ""]
+    intro = "Here is a summary of your conversation with claims support today."
+    if summary.get("representative"):
+        intro = (
+            f"Here is a summary of today's conversation with claims support, held with {summary['representative']}, "
+            "whom you approved to discuss your claims."
+        )
+    lines = [f"Hi {summary['first_name']},", "", intro, ""]
     if summary["claims"]:
         lines.append("What we discussed")
         for claim in summary["claims"]:

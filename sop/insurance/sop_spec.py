@@ -16,12 +16,20 @@ WORKFLOW = (VERIFY_ID, RESOLVE_INTENT, PROCESS_CASE, POST_PROCESS)
 PHASES: dict[str, PhaseSpec] = {
     VERIFY_ID: PhaseSpec(
         name=VERIFY_ID,
-        goal="Verify the caller with at least 3 identity factors before any account access.",
+        goal=(
+            "Verify the caller with at least 3 identity factors before any account access. A representative must "
+            "also be on file for the policyholder and get the policyholder's approval."
+        ),
         autonomy=Autonomy.SCRIPTED,
-        tools=frozenset({"verify_identity", "create_handoff"}),
+        tools=frozenset(
+            {"verify_identity", "check_representative", "request_consent", "check_consent", "create_handoff"}
+        ),
         reply_context=("identity_progress", "caller_statements"),
         nlu_context=(),
-        exit_guard="Exactly one policyholder matches every provided factor, with at least 3 distinct factors.",
+        exit_guard=(
+            "Exactly one policyholder matches every provided factor (at least 3 distinct). For a representative: "
+            "also listed for that policyholder, and the policyholder approved."
+        ),
     ),
     RESOLVE_INTENT: PhaseSpec(
         name=RESOLVE_INTENT,

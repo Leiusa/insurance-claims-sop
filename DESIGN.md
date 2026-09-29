@@ -138,17 +138,17 @@ The fact sheet for the active case contains:
 - **Injection and social engineering.** Examples: "ignore your instructions", "the last agent already verified me". No text can change state. The reply restates the requirement, and an event is logged.
 - **Handoff.** Creates a mock ticket with the phase, verification status, intent and summary, so the caller doesn't have to repeat themselves. The session moves to `ESCALATED`.
 
-## 11. Third-party callers and consent (P1)
+## 11. Third-party callers and consent (implemented)
 
-`representatives.json` and `consent_scenarios.json` are modelled as an authorized-representative flow:
+`representatives.json` and `consent_scenarios.json` are modelled as an authorized-representative flow with three gates, each enforced in code (`_verify_representative`):
 
-1. The caller says they are calling for a policyholder.
-2. The policyholder's factors are verified.
-3. The caller is checked against the representative record.
-4. The policyholder's consent is requested. This is simulated: the status sequence advances by one on each turn. In `default` it goes pending → approved; in `timeout` it stays pending.
-5. If approved, the agent proceeds with `role=representative`. On timeout, nothing is disclosed and the agent offers a human or a callback.
+1. **Locate the account.** The caller gives 3 of the policyholder's details. The same verifier locates the account, and this gives no access by itself.
+2. **Check the record.** The caller's own name must be listed in `representatives.json` for that policyholder. A caller who isn't listed gets no consent request, no disclosure, and a human option.
+3. **Get approval.** The policyholder's approval is requested (`request_consent`) and checked once per caller turn (`check_consent`). The scenario's status sequence advances by one on each check: `default` goes pending → approved. The request times out after `MAX_CONSENT_CHECKS` (3) pending checks.
 
-P0 fallback: a third-party caller gets no account details, an explanation, and the option of a human.
+On approval, the session continues as `role=representative`, and the summary email still goes to the policyholder's own address. On timeout, nothing is disclosed; the agent explains why consent matters and offers alternatives and a human.
+
+The consent tools have gateway preconditions (account located → caller listed → request pending), so the steps can't run out of order.
 
 ## 12. Test UI
 
@@ -162,7 +162,7 @@ P0 fallback: a third-party caller gets no account details, an explanation, and t
   - email preview and outbox
   - handoff ticket
   - `AS_OF_DATE` and the model in use
-- **Preset buttons.** Each replays a scripted conversation: canonical Margaret, frustrated caller, repeated out-of-scope questions, refuses SSN, January ambiguity, another customer's case ID, prompt injection, and son calling (P1).
+- **Preset buttons.** Each replays a scripted conversation: canonical Margaret, frustrated caller, repeated out-of-scope questions, refuses SSN, January ambiguity, another customer's case ID, prompt injection, and son calling (consent approved, and consent timed out).
 
 ## 13. Configuration and delivery
 

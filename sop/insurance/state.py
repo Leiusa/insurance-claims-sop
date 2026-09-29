@@ -51,12 +51,14 @@ class EmailState(BaseModel):
 
 
 class ConsentState(BaseModel):
-    """Policyholder authorization for a representative caller (simulated)."""
+    """Policyholder authorization for a representative caller (simulated with consent_scenarios.json)."""
 
     scenario: str = "default"
-    status: str | None = None  # pending | approved | timeout
+    status: str | None = None  # pending | approved | timeout | not_on_file
     checks: int = 0
-    policyholder_party_id: str | None = None
+    account_party_id: str | None = None  # account located from the policyholder's details; this is not access
+    representative_on_file: bool = False
+    explained: bool = False
 
 
 class Session(BaseModel):

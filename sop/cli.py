@@ -36,7 +36,7 @@ def main() -> None:
 
     print(f"model: {llm.provider}/{llm.model} (nlu: {llm.nlu_model}), as of {settings.today()}")
     for preset in chosen:
-        session = agent.new_session()
+        session = agent.new_session(consent_scenario=preset.get("consent_scenario"))
         print(f"\n=== {preset['title']} ===\nAGENT: {session.transcript[0]['content']}")
         for text in preset["messages"]:
             seen = len(session.events)

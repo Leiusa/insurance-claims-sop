@@ -38,6 +38,8 @@ class Settings:
     oos_threshold: int
     max_verification_attempts: int
     max_gate_pushbacks: int
+    max_consent_checks: int = 3
+    consent_scenario: str = "default"  # which consent_scenarios.json entry new chats simulate
 
     def today(self) -> date:
         return self.as_of_date or date.today()
@@ -81,4 +83,6 @@ def load_settings() -> Settings:
         oos_threshold=_int("OOS_THRESHOLD", 3),
         max_verification_attempts=_int("MAX_VERIFICATION_ATTEMPTS", 3),
         max_gate_pushbacks=_int("MAX_GATE_PUSHBACKS", 3),
+        max_consent_checks=_int("MAX_CONSENT_CHECKS", 3),
+        consent_scenario=_get("CONSENT_SCENARIO") or "default",
     )

@@ -87,6 +87,11 @@ def normalize(factor: str, raw: str) -> str | None:
     return _NORMALIZERS[factor](raw)
 
 
+def names_match(given: str, stored: str) -> bool:
+    value = normalize_name(given)
+    return value is not None and value in _name_keys(stored)
+
+
 def factor_matches(factor: str, value: str, record: Policyholder) -> bool:
     """`value` must already be normalized."""
     if factor == "full_name":

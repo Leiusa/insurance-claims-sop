@@ -38,8 +38,8 @@ What they want: capture this in EVERY phase, including during identity verificat
 - reason_for_call: the overall reason they are contacting support, as a short paraphrase in their words (e.g. "denied healthcare claim from January"). Only when they state it or change it; a follow-up question about the claim already being discussed is NOT a reason for call (null).
 - case_hints: only details the caller gives in this message about WHICH claim they mean: case_id (e.g. CL-2048), case_type (healthcare, dental, auto, ...), status (denied, open, closed, ...), month (1-12), year. Fill year only when the caller states a year or a relative year ("this year", "last year", resolved with TODAY); never infer a year from a month alone. Leave all null for follow-up questions about the claim already being discussed.
 - selected_case_id: only when CANDIDATE CLAIMS are listed and the caller picks one of them (by id, date, type, status, order, "the recent one", ...). Must be one of the listed ids; otherwise null.
-- followup_topic: what they are asking about the current claim: overview, denial_reason, documents_needed, document_details (what a document must contain), file_format, alternatives (a document can't be obtained), submission_method (how or where to send), submission_timing (when or how soon to submit), processing_time (how long after submitting), receipt_confirmation, claim_status, payment_amounts, appeal_deadline, next_steps, other. Null if they are not asking about a claim.
-- memory_items: other facts that will matter later: doc_status ("I have the office note but not the pathology report"), email_pref ("email me the details"), contact_pref ("I prefer fax"), context ("I have surgery next week"). Empty if none.
+- followup_topic: what they are asking about the current claim: overview, denial_reason, documents_needed, document_details (what a document must contain), file_format, alternatives (a document can't be obtained), submission_method (how or where to send), submission_timing (when or how soon to submit), processing_time (how long after submitting), receipt_confirmation, claim_status, payment_amounts, appeal_deadline, next_steps, other. Null if they are not asking about a claim, e.g. asking whether an approval came through, or just acknowledging.
+- memory_items: durable facts that will matter in a later step: doc_status ("I have the office note but not the pathology report"), email_pref ("email me the details"), contact_pref ("I prefer fax"), context ("I have surgery next week"). Not the current state of the conversation (waiting, being verified, asking a question). Empty if none.
 
 Scope
 - in_scope: insurance claims, this conversation, identity verification, the support process, documents, policies.
@@ -153,6 +153,7 @@ Style
 - Empathy should sound human and specific to what they said, not scripted. Don't over-apologize or repeat stock phrases.
 - Before verification you may use the name the customer gave, but never imply you recognize them or their account.
 - Write dates in a friendly form such as "January 12, 2026".
+- After mentioning someone's full name once, use their first name or a pronoun instead of repeating it.
 - No markdown headings or tables. Use a short list only for 3 or more items (such as documents).
 - Reply in the customer's language."""
 
@@ -242,6 +243,11 @@ def render_directive(kind: str, p: dict[str, Any]) -> str:
             text += f"These didn't come through in a usable form, so ask again: {', '.join(p['unusable'])}. "
         if p["declined"]:
             text += f"They declined: {', '.join(p['declined'])}; don't ask for that again. "
+        if p.get("whose") == "the policyholder's":
+            return text + (
+                f"Ask for {p['need']} more of the policyholder's details so you can locate the account; "
+                f"they can choose any of: {', '.join(p['options'])}."
+            )
         return text + f"Ask for {p['need']} more detail(s) to verify their identity; they can choose any of: {', '.join(p['options'])}."
     if kind == "verification_failed":
         last = " This is their last attempt in this chat." if p["attempts_left"] == 1 else ""
@@ -256,21 +262,51 @@ def render_directive(kind: str, p: dict[str, Any]) -> str:
             f"Respect that they'd rather not share {', '.join(p['declined'])}. Explain that three details are required "
             "and there aren't enough other options left to verify here."
         )
-    if kind == "third_party_notice":
+    if kind == "representative_process":
         rel = f" (their {p['relationship']})" if p.get("relationship") else ""
         return (
-            f"They are contacting us on behalf of someone else{rel}. Kindly explain that for privacy you can only discuss "
-            "a claim with the policyholder, or with someone the policyholder has authorized, and suggest the policyholder "
-            "contacts support directly or joins the conversation."
+            f"They are contacting us on behalf of someone else{rel}. Briefly explain how this works: you'll locate the "
+            "policyholder's account with three of the policyholder's details, confirm they're listed as an authorized "
+            "representative, and then send the policyholder a request to approve access. Nothing about the account can "
+            "be shared before that."
+        )
+    if kind == "ask_representative_name":
+        return "Ask for their own full name (the person contacting us), so you can check whether they're listed as an authorized representative."
+    if kind == "consent_requested":
+        return (
+            f"Say you've located {p['holder']}'s account and they're listed as an authorized representative, so you've "
+            f"sent {p['holder']} a request to approve access, using the contact details on file. Ask them to hold on; "
+            "you'll check the status on their next message."
+        )
+    if kind == "consent_pending":
+        return (
+            f"Say you've checked and {p['holder']}'s approval is still pending. Suggest they ask {p['holder']} to approve "
+            "the request; you'll check again on their next message."
+        )
+    if kind == "consent_approved":
+        return (
+            f"Tell them {p['holder']} has approved the request, so you can now help with {p['holder']}'s claims. "
+            f"Address them as {p['representative']}."
+        )
+    if kind == "consent_timeout":
+        return (
+            f"Say you haven't received {p['holder']}'s approval, so to protect {p['holder']}'s privacy you can't share "
+            f"account details in this chat. Offer the options: {p['holder']} can approve later and they can reach out "
+            f"again, {p['holder']} can contact support directly, or a representative can help."
+        )
+    if kind == "representative_not_on_file":
+        return (
+            f"Say you don't see them listed as an authorized representative on {p['holder']}'s account, so you can't "
+            f"share account details. Suggest {p['holder']} contacts support to add them as an authorized contact, "
+            "or a representative can help."
         )
     if kind == "verification_success":
         return f"Confirm they're verified and thank them, addressing them as they introduced themselves ({p['name']})."
     if kind == "explain_consent":
         return (
-            "Explain with empathy why the policyholder's own authorization matters: claim records hold her protected "
-            "medical and financial information, so even close family need her permission, which protects her. Offer "
-            "the acceptable paths: she joins the conversation or contacts support, or a representative helps set up "
-            "authorized access. Do not ask them for her personal details."
+            "Explain with empathy why the policyholder's own approval matters: claim records hold the policyholder's "
+            "protected medical and financial information, so even close family need the policyholder's permission; "
+            "it protects the policyholder. Keep the process moving without pressuring them."
         )
     if kind == "no_claims_on_file":
         return "Say you don't see any claims on file for their account."
@@ -303,8 +339,9 @@ def render_directive(kind: str, p: dict[str, Any]) -> str:
     if kind == "offer_email":
         pref = f" They said earlier: '{p['preference']}'; acknowledge it." if p.get("preference") else ""
         contents = "what was discussed, the claim status, and next steps" if p.get("claims_discussed") else "what was discussed"
+        recipient = f"{p['owner']}'s email on file" if p.get("owner") else "their email on file"
         return (
-            f"Offer to email them a summary of this conversation ({contents}) at their email on file, "
+            f"Offer to email a summary of this conversation ({contents}) to {recipient}, "
             f"{p['masked_email']}. Make clear they can say yes or skip it.{pref}"
         )
     if kind == "email_other_address_declined":
