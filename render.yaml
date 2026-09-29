@@ -1,0 +1,15 @@
+# Render Blueprint: New > Blueprint > select this repo.
+# Secrets marked sync: false are entered in the Render dashboard, never committed.
+services:
+  - type: web
+    name: claims-sop-harness
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: LLM_API_KEY
+        sync: false
+      - key: DEMO_PASSCODE
+        sync: false
+      - key: LLM_MODEL
+        value: gpt-5.4-mini

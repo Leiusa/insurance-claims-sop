@@ -1,6 +1,6 @@
 # Insurance Claims SOP Harness: Design
 
-Status: draft for review, 2026-09-28
+Status: implemented. See README.md for how to run it; this file explains the design.
 
 ## 1. Goal and principles
 
@@ -45,7 +45,7 @@ Failures: if the NLU returns invalid JSON, it is retried once; after that the tu
 | Phase | LLM can see | Gateway allowlist | Autonomy | Exit guard (code) |
 |---|---|---|---|---|
 | `VERIFY_ID` | transcript; which slot *types* were provided or refused; how many are still needed; the caller's own stated hints | `verify_identity` | **Scripted.** The engine decides what to ask; the LLM phrases it, empathizes and answers "why" questions. | Exactly one policyholder matches at least 3 distinct PII factors, with no contradictions |
-| `RESOLVE_INTENT` | the verified caller's claim index (id, type, filed date, status); memory | `list_claims` | **Guided.** The LLM maps messy references onto a closed candidate set. | Exactly one active case, or no claims at all (goes to `POST_PROCESS`) |
+| `RESOLVE_INTENT` | the verified caller's claim index (id, type, filed date, status); memory | `list_claims`, `get_claim_facts` (ownership-checked) | **Guided.** The LLM maps messy references onto a closed candidate set. | Exactly one active case, or no claims at all (goes to `POST_PROCESS`) |
 | `PROCESS_CASE` | fact sheet for the active case (§8); memory | `get_claim`, `get_guidance`, `request_human` | **Open.** The LLM reasons freely over the fact sheet, but only over the fact sheet. | Caller is done → `POST_PROCESS`; another case → `RESOLVE_INTENT`; human → `ESCALATED` |
 | `POST_PROCESS` | structured session summary; masked on-file email | `send_email_summary` (requires explicit consent tied to this summary and recipient) | **Constrained.** Send or skip. | Sent or skipped → `ENDED`; more questions → `PROCESS_CASE` |
 
