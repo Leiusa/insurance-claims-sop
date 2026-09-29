@@ -152,7 +152,7 @@ Style
 - Warm, calm, professional and concise: usually 2 to 5 sentences, in plain language.
 - Empathy should sound human and specific to what they said, not scripted. Don't over-apologize or repeat stock phrases.
 - Before verification you may use the name the customer gave, but never imply you recognize them or their account.
-- Write dates in a friendly form such as "January 12, 2026".
+- Write dates naturally in the same language as the rest of your reply, e.g. "January 12, 2026" in English or "2026年1月12日" in Chinese.
 - After mentioning someone's full name once, use their first name or a pronoun instead of repeating it.
 - No markdown headings or tables. Use a short list only for 3 or more items (such as documents).
 - Reply in the customer's language."""
@@ -185,7 +185,10 @@ TOPIC_GUIDE = {
     "submission_timing": "Answer when to submit using timing_note, which overrides the generic 'within a week' guidance.",
     "processing_time": "Explain what happens after submission and the typical processing time.",
     "receipt_confirmation": "Explain how they will know the documents were received.",
-    "claim_status": "Explain the claim's current status and what it means.",
+    "claim_status": (
+        "Explain the claim's current status and what it means, including what has been paid so far and any expected "
+        "amount, each described as its 'how_to_describe' says."
+    ),
     "payment_amounts": "Explain the amounts exactly as stated, describing each as its 'how_to_describe' says. Don't compute new numbers.",
     "appeal_deadline": "State the appeal deadline and whether it has passed.",
     "next_steps": "Lay out the concrete next steps from the facts (documents, how to submit, timing_note).",
@@ -328,14 +331,21 @@ def render_directive(kind: str, p: dict[str, Any]) -> str:
         return f"Ask which claim they're contacting us about, briefly listing their claims: {_claims_text(p['claims'])}."
     if kind == "answer":
         lead = " This is your first answer about this claim, so answer what they came for directly." if p["first_answer"] else ""
-        return f"Answer their question about the active claim (topic: {p['topic']}).{lead} {TOPIC_GUIDE.get(p['topic'], TOPIC_GUIDE['other'])}"
+        return (
+            f"Answer their question about the active claim (topic: {p['topic']}).{lead} "
+            f"{TOPIC_GUIDE.get(p['topic'], TOPIC_GUIDE['other'])} If their latest message raises a specific worry or "
+            "question the facts can answer (for example, an amount they think they owe), address it too."
+        )
     if kind == "deadline_caveat":
         return (
             f"Point out that the appeal deadline on record ({p['deadline']}) has already passed, so a claims "
             "representative would need to confirm whether a late submission can still be considered."
         )
     if kind == "invite_followup":
-        return "End by asking whether there's anything else they'd like to know about this claim."
+        return (
+            "End with a brief, natural invitation to ask more about this claim. Vary the wording instead of repeating "
+            "the same closing, and you may suggest one relevant next question."
+        )
     if kind == "offer_email":
         pref = f" They said earlier: '{p['preference']}'; acknowledge it." if p.get("preference") else ""
         contents = "what was discussed, the claim status, and next steps" if p.get("claims_discussed") else "what was discussed"
