@@ -30,6 +30,7 @@ def test_unknown_session_and_empty_message(monkeypatch):
     assert client.post("/api/sessions/nope/messages", json={"text": "hi"}).status_code == 404
     session_id = client.post("/api/sessions").json()["session_id"]
     assert client.post(f"/api/sessions/{session_id}/messages", json={"text": ""}).status_code == 422
+    assert client.post(f"/api/sessions/{session_id}/messages", json={"text": "   "}).status_code == 422
 
 
 def test_passcode_protects_the_api(monkeypatch):

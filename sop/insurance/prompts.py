@@ -252,6 +252,20 @@ def render_directive(kind: str, p: dict[str, Any]) -> str:
                 f"they can choose any of: {', '.join(p['options'])}."
             )
         return text + f"Ask for {p['need']} more detail(s) to verify their identity; they can choose any of: {', '.join(p['options'])}."
+    if kind == "verification_choice":
+        return (
+            "Stop asking for their details and stop persuading. Say plainly that claim details need verification; "
+            f"they're welcome to share {p['need']} more detail(s) whenever they're ready ({', '.join(p['options'])}), "
+            "or you can connect them with a representative. Respect whichever they choose."
+        )
+    if kind == "goodbye_early":
+        return "They'd like to stop here. Acknowledge that warmly, don't ask for anything else, and say they're welcome to come back anytime."
+    if kind == "representative_changed":
+        return (
+            f"The person now gives a different name from the representative that {p['holder']} was asked to approve. "
+            f"To protect {p['holder']}, say you can't continue this authorization or share account details in this "
+            f"chat. Suggest {p['holder']} contacts support directly, or offer a representative."
+        )
     if kind == "verification_failed":
         last = " This is their last attempt in this chat." if p["attempts_left"] == 1 else ""
         return (
@@ -412,6 +426,17 @@ def fallback_reply(phase: str, directives: list[tuple[str, dict[str, Any]]], con
         if kind in by_kind:
             return f"Would you like me to email a summary of our conversation to {by_kind[kind]['masked_email']}, or skip it?"
     return "Sorry, I had trouble putting that answer together. Could you say that again, or would you like me to connect you with a representative?"
+
+
+def not_understood(pending_question: str | None) -> str:
+    """Deterministic reply when the message could not be understood. Nothing in the session changed."""
+    follow_up = {
+        "email_consent": " Would you like me to email the summary, or skip it?",
+        "need_identity": " Could you share those details again?",
+        "choose_case": " Which claim would you like to ask about?",
+        "consent_pending": " I'll check the authorization again on your next message.",
+    }.get(pending_question or "", " Could you say that again?")
+    return "Sorry, I didn't quite catch that." + follow_up
 
 
 def closed_message(phase: str, handoff: dict[str, Any] | None) -> str:

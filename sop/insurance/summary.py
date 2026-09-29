@@ -46,6 +46,7 @@ def build_summary(
     repo: FixtureRepo,
     today: date,
     representative: str | None = None,
+    notes: list[str] | None = None,
 ) -> dict[str, Any]:
     holder = repo.policyholder(party_id)
     claims, next_steps = [], []
@@ -86,6 +87,7 @@ def build_summary(
         "representative": representative,
         "recipient_masked": mask_email(holder.email if holder else None),
         "claims": claims,
+        "caller_notes": list(notes or []),  # the caller's own words (document status, preferences)
         "next_steps": next_steps or ["No further action is needed right now."],
         "prepared_on": today.isoformat(),
     }
@@ -107,6 +109,8 @@ def render_email(summary: dict[str, Any], *, to: str) -> dict[str, str]:
                 lines.append(f"  Topics covered: {', '.join(claim['topics'])}.")
     else:
         lines.append("We verified your identity and found no claims on file for your account.")
+    if summary.get("caller_notes"):
+        lines += ["", "What you told us"] + [f"- {note}" for note in summary["caller_notes"]]
     lines += ["", "Next steps"] + [f"- {step}" for step in summary["next_steps"]]
     lines += ["", "If anything here looks wrong, reply to this email or contact claims support.", "", "Claims Support"]
     return {"to": to, "subject": "Summary of your claims support conversation", "body": "\n".join(lines)}

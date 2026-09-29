@@ -15,7 +15,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 
 from ..config import ROOT, load_settings
@@ -40,6 +40,13 @@ locks: dict[str, asyncio.Lock] = {}
 
 class MessageIn(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("text")
+    @classmethod
+    def not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("message is empty")
+        return value
 
 
 class SessionIn(BaseModel):

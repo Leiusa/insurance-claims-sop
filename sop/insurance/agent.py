@@ -18,7 +18,7 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from ..config import Settings
-from ..harness.events import emit
+from ..harness.events import emit, redact
 from ..harness.gateway import Tool, ToolDenied, ToolGateway
 from ..harness.guard import GuardPolicy, check_reply, money_values
 from ..llm.client import LLMClient, LLMError
@@ -30,7 +30,16 @@ from .resolver import CaseHints, match_claims
 from .sop_spec import ENDED, ESCALATED, PHASES, POST_PROCESS, PROCESS_CASE, RESOLVE_INTENT, VERIFY_ID, WORKFLOW
 from .state import MemoryItem, Session, SlotValue
 from .summary import build_summary, mask_email, render_email
-from .verifier import FACTOR_LABELS, FACTORS, REQUIRED_FACTORS, VerificationResult, names_match, normalize, verify
+from .verifier import (
+    FACTOR_LABELS,
+    FACTORS,
+    REQUIRED_FACTORS,
+    VerificationResult,
+    names_match,
+    normalize,
+    normalize_name,
+    verify,
+)
 
 GREETING = (
     "Hi, thanks for contacting claims support. I can help with questions about your insurance claims. "
@@ -139,6 +148,7 @@ class InsuranceAgent:
                     repo=repo,
                     today=self.settings.today(),
                     representative=s.representative_name if s.consent.status == "approved" else None,
+                    notes=[m.value for m in s.memory if m.kind in ("doc_status", "contact_pref", "context")],
                 ),
                 require_verified,
             )
@@ -180,6 +190,7 @@ class InsuranceAgent:
         for rep in self.repo.representatives_for(session.consent.account_party_id):
             if names_match(session.representative_name or "", rep.rep_name):
                 session.consent.representative_on_file = True
+                session.consent.representative = rep.rep_name  # the authorization is bound to this person
                 return rep
         return None
 
@@ -226,6 +237,11 @@ class InsuranceAgent:
         session.turn += 1
         session.transcript.append({"role": "user", "content": text})
         nlu = self._understand(session, text)
+        if nlu is None:
+            # Understanding failed: change nothing (state, counters, consent, phase) and ask again.
+            reply = prompts.not_understood(session.pending_question)
+            session.transcript.append({"role": "assistant", "content": reply})
+            return reply
         plan = Plan()
         self._capture(session, nlu)
         if not self._global_policies(session, nlu, plan):
@@ -236,10 +252,11 @@ class InsuranceAgent:
 
     # ------------------------------------------------------------------ 1. understand
 
-    def _understand(self, session: Session, text: str) -> NLUResult:
+    def _understand(self, session: Session, text: str) -> NLUResult | None:
+        """The model's reading of the message, or None if it could not be understood."""
         if self.llm is None:
             emit(session, "nlu_failed", "No model configured; nothing changes this turn")
-            return NLUResult.empty()
+            return None
         spec = self.specs[session.phase]
         context = {key: self._context(key, session) for key in spec.nlu_context}
         user = prompts.nlu_user_prompt(
@@ -258,8 +275,8 @@ class InsuranceAgent:
                 return nlu
             except LLMError as exc:
                 error = exc
-        emit(session, "nlu_failed", f"Could not understand the message ({error}); nothing changes this turn")
-        return NLUResult.empty()
+        emit(session, "nlu_failed", f"Could not understand the message ({redact(str(error))[:200]}); nothing changes this turn")
+        return None
 
     # ------------------------------------------------------------------ 2. record
 
@@ -270,8 +287,7 @@ class InsuranceAgent:
         if role_open and nlu.caller_role != "unknown" and nlu.caller_role != session.caller_role:
             session.caller_role = nlu.caller_role
             emit(session, "caller_role", f"Caller role: {nlu.caller_role}")
-        session.representative_name = nlu.representative_name or session.representative_name
-        session.representative_relationship = nlu.representative_relationship or session.representative_relationship
+        self._track_representative(session, nlu)
 
         ident.unusable = []
         # For a representative these are the policyholder's details: they locate the account, but
@@ -312,8 +328,12 @@ class InsuranceAgent:
         if choosing:
             if nlu.intent:
                 session.intent = nlu.intent
-            if hints.any():
-                session.case_hints = hints if nlu.wants_other_case else session.case_hints.merged(hints)
+            if nlu.wants_other_case:
+                # A new "which claim" request starts fresh: old hints must not steer it back to the same claim.
+                session.case_hints = hints
+                session.left_case_id = session.active_case_id or session.left_case_id
+            elif hints.any():
+                session.case_hints = session.case_hints.merged(hints)
             if nlu.reason_for_call:
                 session.reason_for_call = nlu.reason_for_call
             if hints.any() or nlu.reason_for_call:
@@ -322,18 +342,48 @@ class InsuranceAgent:
             self._remember(session, item.kind, item.value)
         session.sentiment = nlu.sentiment
 
+    def _track_representative(self, session: Session, nlu: NLUResult) -> None:
+        """Authorization is bound to the representative checked against the record, not to a mutable name."""
+        consent = session.consent
+        new_name = nlu.representative_name
+        if new_name and consent.representative and consent.status in ("pending", "approved"):
+            if normalize_name(new_name) is None:
+                new_name = None  # a first name alone ("David") neither changes nor re-binds the representative
+            elif not names_match(new_name, consent.representative):
+                self._revoke_representative(session)
+        session.representative_name = new_name or session.representative_name
+        session.representative_relationship = nlu.representative_relationship or session.representative_relationship
+
+    def _revoke_representative(self, session: Session) -> None:
+        """Someone other than the checked representative is speaking: void the pending or granted access."""
+        consent = session.consent
+        was_granted = consent.status == "approved"
+        consent.status = "revoked"
+        consent.representative_on_file = False
+        emit(
+            session,
+            "representative_changed",
+            "A different representative name was given after the record check; authorization revoked",
+        )
+        if was_granted:
+            session.identity.verified_party_id = None
+            session.active_case_id = None
+            session.candidate_case_ids = []
+            if session.phase != VERIFY_ID:
+                self._transition(session, VERIFY_ID, "representative changed; access revoked")
+
     def _remember(self, session: Session, kind: str, value: str) -> None:
         value = value.strip()
         if not value or any(m.value.casefold() == value.casefold() for m in session.memory):
             return
         session.memory.append(MemoryItem(kind=kind, value=value, turn=session.turn, phase_said=session.phase))
-        emit(session, "memory_saved", f"Remembered ({kind}): {value}")
+        emit(session, "memory_saved", f"Remembered ({kind}): {redact(value)}")
 
     def _use_memory(self, session: Session, kinds: set[str]) -> None:
         for item in session.memory:
             if item.kind in kinds and item.phase_said != session.phase and session.phase not in item.used_in:
                 item.used_in.append(session.phase)
-                emit(session, "memory_used", f"Using '{item.value}' (said during {item.phase_said})")
+                emit(session, "memory_used", f"Using '{redact(item.value)}' (said during {item.phase_said})")
 
     # ------------------------------------------------------------------ 3. global policies
 
@@ -416,6 +466,8 @@ class InsuranceAgent:
             plan.add("verification_locked")
             self._offer_human(session, plan, "verification is locked")
             return
+        if self._stop_requested(nlu):
+            return self._end_early(session, plan)
         if session.caller_role == "representative":
             return self._verify_representative(session, nlu, plan)
         marker = len(plan.items)
@@ -438,6 +490,17 @@ class InsuranceAgent:
         )
         plan.add("verification_success", name=session.caller_name or holder.name)
         self._transition(session, RESOLVE_INTENT, "identity verified")
+
+    def _stop_requested(self, nlu: NLUResult) -> bool:
+        """The caller wants to stop and gave nothing else to act on this turn."""
+        gave_details = any(getattr(nlu.identity, f) for f in FACTORS)
+        gave_case = CaseHints(**nlu.case_hints.model_dump()).any() or bool(nlu.selected_case_id)
+        return nlu.wants_end and not gave_details and not gave_case and not nlu.followup_topic
+
+    def _end_early(self, session: Session, plan: Plan) -> None:
+        emit(session, "caller_ended", f"Caller chose to stop during {session.phase}; nothing further requested")
+        plan.add("goodbye_early")
+        self._transition(session, ENDED, "caller chose to stop")
 
     def _count_pushback(self, session: Session, nlu: NLUResult, plan: Plan) -> None:
         if not nlu.pushback_on_gate:
@@ -465,8 +528,12 @@ class InsuranceAgent:
             plan.add("explain_consent")
         self._count_pushback(session, nlu, plan)
 
-        if consent.status in ("timeout", "not_on_file"):
-            kind = "consent_timeout" if consent.status == "timeout" else "representative_not_on_file"
+        if consent.status in ("timeout", "not_on_file", "revoked"):
+            kind = {
+                "timeout": "consent_timeout",
+                "not_on_file": "representative_not_on_file",
+                "revoked": "representative_changed",
+            }[consent.status]
             plan.add(kind, holder=self._holder_label(session))
             self._offer_human(session, plan, "a representative can help with authorized access")
             return
@@ -523,6 +590,12 @@ class InsuranceAgent:
 
     def _grant_representative(self, session: Session, plan: Plan) -> None:
         consent = session.consent
+        # Defense in depth: the approval is only valid for the representative it was requested for.
+        if not consent.representative or not names_match(session.representative_name or "", consent.representative):
+            self._revoke_representative(session)
+            plan.add("representative_changed", holder=self._holder_label(session))
+            self._offer_human(session, plan, "a representative can help with authorized access")
+            return
         consent.status = "approved"
         session.identity.verified_party_id = consent.account_party_id
         emit(
@@ -572,8 +645,10 @@ class InsuranceAgent:
             plan.add("cannot_verify_with_remaining", declined=[FACTOR_LABELS[f] for f in ident.refused])
             self._offer_human(session, plan, "they can verify with a representative instead")
             return
+        # After repeated pushback, stop persuading: leave the door open and offer a person instead.
+        persuasion_over = session.counters.gate_pushbacks >= self.settings.max_gate_pushbacks
         plan.add(
-            "ask_identity",
+            "verification_choice" if persuasion_over else "ask_identity",
             have=[FACTOR_LABELS[f] for f in ident.provided],
             need=need,
             options=[FACTOR_LABELS[f] for f in available],
@@ -585,6 +660,8 @@ class InsuranceAgent:
         return None
 
     def _resolve_intent(self, session: Session, nlu: NLUResult, plan: Plan, entered: bool) -> None:
+        if not entered and self._stop_requested(nlu):
+            return self._end_early(session, plan)
         claims = self.gateway.call("list_claims", session)
         if not claims:
             emit(session, "no_claims", "No claims on file for the verified caller")
@@ -592,10 +669,12 @@ class InsuranceAgent:
             self._transition(session, POST_PROCESS, "no claims on file")
             return
         by_id = {c.case_id.upper(): c for c in claims}
+        leaving = (session.left_case_id or "").upper()
 
-        # The model may pick a claim, but only from the caller's own claims (a closed set).
+        # The model may pick a claim, but only from the caller's own claims (a closed set), and
+        # not the one the caller just asked to move away from (a carry-over from context).
         pick = (nlu.selected_case_id or "").strip().upper()
-        if pick in by_id:
+        if pick in by_id and pick != leaving:
             return self._select_case(session, plan, by_id[pick].case_id, "the caller's choice")
 
         # The caller answered our "which one?" question with a description.
@@ -633,15 +712,19 @@ class InsuranceAgent:
             session.candidate_case_ids = list(by_id)
             session.pending_question = "choose_case"
             return
-        if len(claims) == 1:
-            return self._select_case(session, plan, claims[0].case_id, "the only claim on file")
-        session.candidate_case_ids = list(by_id)
-        plan.add("ask_which_claim", claims=[c.brief() for c in claims])
+        # Nothing to go on. "Another claim" means one other than the claim being left.
+        others = [c for c in claims if c.case_id.upper() != leaving] or claims
+        if len(others) == 1:
+            how = "the only other claim on file" if leaving else "the only claim on file"
+            return self._select_case(session, plan, others[0].case_id, how)
+        session.candidate_case_ids = [c.case_id.upper() for c in others]
+        plan.add("ask_which_claim", claims=[c.brief() for c in others])
         session.pending_question = "choose_case"
 
     def _select_case(self, session: Session, plan: Plan, case_id: str, how: str, from_memory: bool = False) -> None:
         claim = self.repo.claim(case_id)
         session.active_case_id = claim.case_id
+        session.left_case_id = None
         session.candidate_case_ids = []
         session.discussed.setdefault(claim.case_id, [])
         emit(session, "case_selected", f"{claim.case_id} selected ({how})")
@@ -712,6 +795,14 @@ class InsuranceAgent:
             session.pending_question = "email_consent"
             emit(session, "email_offered", f"Email summary offered to {masked}; waiting for send or skip")
             return
+        if nlu.followup_topic or nlu.wants_other_case:
+            # A question in the same message comes first ("send it, but first tell me..."). Consent must
+            # be for the final summary, so the offer is made again, with an updated summary, afterwards.
+            email.offered = False
+            emit(session, "email_deferred", "Caller asked another question; the email offer will be repeated after it")
+            target = RESOLVE_INTENT if (nlu.wants_other_case or not session.active_case_id) else PROCESS_CASE
+            self._transition(session, target, "caller has another question")
+            return
         if nlu.wants_other_email_address:
             emit(session, "email_other_address_declined", "Caller asked for another address; only the email on file is allowed")
             plan.add("email_other_address_declined", masked_email=masked)
@@ -733,10 +824,10 @@ class InsuranceAgent:
             plan.add("goodbye")
             self._transition(session, ENDED, "caller skipped the summary")
             return
-        if nlu.followup_topic or nlu.wants_other_case:
-            email.offered = False
-            target = RESOLVE_INTENT if (nlu.wants_other_case or not session.active_case_id) else PROCESS_CASE
-            self._transition(session, target, "caller has another question")
+        if nlu.scope in ("out_of_scope", "in_scope_unanswerable") or (nlu.sentiment != "neutral" and nlu.intensity >= 2):
+            # Not an answer to the offer (handled by the global policies): repeat it without
+            # spending one of the "unclear answer" chances.
+            plan.add("email_reask", masked_email=masked)
             return
         session.counters.email_unclear += 1
         if session.counters.email_unclear >= 2:
@@ -828,21 +919,23 @@ class InsuranceAgent:
         return phrases
 
     def _guard_policy(self, session: Session, context: dict[str, Any]) -> GuardPolicy:
+        # Amounts may only come from the facts given to the model. An amount the caller mentioned
+        # is their claim, not a fact, so it is never whitelisted (the reply can refer to it in words).
+        # Claim IDs the caller typed may be echoed ("I don't see CL-2048 on your account").
         said = " ".join(m["content"] for m in session.transcript if m["role"] == "user")
         caller_ids = {m.upper() for m in self.case_id_pattern.findall(said)}
-        caller_money = money_values(said)
         party = session.identity.verified_party_id
         if not party:
-            # Before verification: no claim IDs, amounts or claim dates, except what the caller said themselves.
+            # Before verification: no amounts or claim dates at all, and no claim IDs except the caller's own words.
             return GuardPolicy(
                 id_pattern=self.case_id_pattern,
                 allowed_ids=caller_ids,
-                allowed_money=caller_money,
+                allowed_money=set(),
                 forbidden_phrases=self.claim_date_phrases,
             )
         own = {c.case_id.upper() for c in self.repo.claims_for(party)}
         in_context = money_values(json.dumps(context, default=str))
-        return GuardPolicy(id_pattern=self.case_id_pattern, allowed_ids=own | caller_ids, allowed_money=caller_money | in_context)
+        return GuardPolicy(id_pattern=self.case_id_pattern, allowed_ids=own | caller_ids, allowed_money=in_context)
 
     def _reply(self, session: Session, plan: Plan) -> str:
         spec = self.specs[session.phase]
@@ -856,7 +949,7 @@ class InsuranceAgent:
                 try:
                     reply = self.llm.text(system=system + feedback, messages=messages)
                 except LLMError as exc:
-                    emit(session, "reply_failed", f"Reply model failed ({exc})")
+                    emit(session, "reply_failed", f"Reply model failed ({redact(str(exc))[:200]})")
                     break
                 violations = check_reply(reply, policy)
                 if not violations:

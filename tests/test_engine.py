@@ -6,8 +6,10 @@ import pytest
 
 from sop.config import Settings
 from sop.harness.gateway import ToolDenied
+from sop.harness.guard import check_reply
 from sop.insurance.agent import InsuranceAgent
 from sop.insurance.nlu_schema import NLUResult
+from sop.llm.client import LLMError
 from tests.conftest import FIXTURES
 
 MARGARET = {"full_name": "Margaret Chen", "dob": "1985-03-15", "id_last4": "4472"}
@@ -31,7 +33,10 @@ class FakeLLM:
         self.reply_prompts: list[str] = []
 
     def structured(self, *, system, user, schema, name):
-        return self.queue.pop(0)
+        item = self.queue.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
 
     def text(self, *, system, messages):
         self.reply_prompts.append(system)
@@ -65,6 +70,12 @@ def say(agent, session, result):
 
 def kinds(session):
     return [e.kind for e in session.events]
+
+
+def fail_turn(agent, session):
+    """A turn where the understanding model fails twice (the engine retries once)."""
+    agent.llm.queue += [LLMError("simulated outage"), LLMError("simulated outage")]
+    return agent.handle(session, "(unreadable)")
 
 
 def test_canonical_turn_verifies_and_uses_remembered_hint(agent):
@@ -269,3 +280,118 @@ def test_consent_tools_cannot_run_out_of_order(agent):
     for tool in ("check_representative", "request_consent", "check_consent"):
         with pytest.raises(ToolDenied):
             agent.gateway.call(tool, s)
+
+
+# --- Review findings (2026-09-29): each test reproduces the reported defect -------------------
+
+
+def test_representative_change_while_pending_voids_authorization(agent):
+    s = agent.new_session(consent_scenario="default")  # the next check would approve
+    say(agent, s, nlu(identity=MARGARET, **DAVID))
+    prompt = say(agent, s, nlu(representative_name="Kevin Lee"))
+    assert s.consent.status == "revoked" and s.identity.verified_party_id is None
+    assert "representative_changed" in kinds(s) and "consent_approved" not in kinds(s)
+    assert "CL-2048" not in prompt
+
+
+def test_representative_change_after_approval_revokes_access(agent):
+    s = agent.new_session(consent_scenario="default")
+    say(agent, s, nlu(identity=MARGARET, case_hints={"status": "denied"}, **DAVID))
+    say(agent, s, nlu(scope="smalltalk"))
+    assert s.identity.verified_party_id == "P9"
+    prompt = say(agent, s, nlu(representative_name="Kevin Lee", followup_topic="payment_amounts"))
+    assert s.identity.verified_party_id is None and s.phase == "VERIFY_ID" and s.active_case_id is None
+    assert "1,450" not in prompt and "pathology" not in prompt
+
+
+def test_first_name_alone_is_not_a_different_representative(agent):
+    s = agent.new_session(consent_scenario="default")
+    say(agent, s, nlu(identity=MARGARET, **DAVID))
+    say(agent, s, nlu(representative_name="David"))
+    assert s.consent.status == "approved" and s.representative_name == "David Chen"
+
+
+def test_failed_understanding_changes_nothing_in_wrap_up(agent):
+    s = agent.new_session()
+    say(agent, s, nlu(identity=MARGARET, case_hints={"status": "denied"}))
+    say(agent, s, nlu(wants_end=True))
+    before = s.model_dump(exclude={"transcript", "events", "turn"})
+    for _ in range(2):
+        reply = fail_turn(agent, s)
+    assert "didn't quite catch that" in reply
+    assert s.model_dump(exclude={"transcript", "events", "turn"}) == before  # still waiting for send or skip
+
+
+def test_failed_understanding_does_not_advance_consent(agent):
+    s = agent.new_session(consent_scenario="default")
+    say(agent, s, nlu(identity=MARGARET, **DAVID))
+    fail_turn(agent, s)
+    assert s.consent.status == "pending" and s.consent.checks == 1 and s.identity.verified_party_id is None
+
+
+def test_switching_claims_without_details_asks_which(agent):
+    s = agent.new_session()
+    say(agent, s, nlu(identity=MARGARET, case_hints={"status": "denied"}))
+    say(agent, s, nlu(wants_other_case=True, selected_case_id="CL-2048"))  # a carried-over pick is ignored
+    assert s.phase == "RESOLVE_INTENT" and s.active_case_id is None
+    assert "CL-2048" not in s.candidate_case_ids and len(s.candidate_case_ids) == 3
+
+
+def test_question_in_the_same_message_as_send_is_answered_first(agent):
+    s = agent.new_session()
+    say(agent, s, nlu(identity=MARGARET, case_hints={"status": "denied"}))
+    say(agent, s, nlu(wants_end=True))
+    say(agent, s, nlu(email_decision="send", followup_topic="payment_amounts"))
+    assert s.email.message is None and s.phase == "PROCESS_CASE" and "email_deferred" in kinds(s)
+    say(agent, s, nlu(wants_end=True))
+    assert s.phase == "POST_PROCESS" and "payment amounts" in str(s.email.summary)
+
+
+def test_off_topic_during_the_email_offer_is_not_an_answer(agent):
+    s = agent.new_session()
+    say(agent, s, nlu(identity=MARGARET, case_hints={"status": "denied"}))
+    say(agent, s, nlu(wants_end=True))
+    for _ in range(3):
+        say(agent, s, nlu(scope="out_of_scope"))
+    assert s.phase == "POST_PROCESS" and s.email.decision is None and s.counters.email_unclear == 0
+    assert "human_offered" in kinds(s)
+
+
+def test_guard_rejects_amounts_only_the_caller_mentioned(agent):
+    s = agent.new_session()
+    say(agent, s, nlu(identity=MARGARET, case_hints={"status": "denied"}))
+    s.transcript.append({"role": "user", "content": "I expect $9,999.00."})
+    policy = agent._guard_policy(s, {"active_case_facts": agent._facts(s)})
+    assert check_reply("The insurer has paid you $9,999.00.", policy)
+    assert not check_reply("The fee-schedule figure is $1,450.00.", policy)
+
+
+def test_caller_can_stop_during_verification(agent):
+    s = agent.new_session()
+    say(agent, s, nlu(identity={"full_name": "Margaret Chen"}))
+    prompt = say(agent, s, nlu(wants_end=True, scope="smalltalk"))
+    assert s.phase == "ENDED" and "more detail(s) to verify" not in prompt
+
+
+def test_after_repeated_pushback_the_agent_stops_asking(agent):
+    s = agent.new_session()
+    for _ in range(3):
+        prompt = say(agent, s, nlu(pushback_on_gate=True))
+    assert "Stop asking for their details" in prompt and "human_offered" in kinds(s)
+
+
+def test_summary_carries_the_callers_own_notes(agent):
+    s = agent.new_session()
+    note = {"kind": "doc_status", "value": "has the office note but not the pathology report"}
+    say(agent, s, nlu(identity=MARGARET, case_hints={"status": "denied"}, memory_items=[note]))
+    say(agent, s, nlu(wants_end=True))
+    say(agent, s, nlu(email_decision="send"))
+    assert note["value"] in s.email.message["body"]
+
+
+def test_audit_log_masks_contact_details(agent):
+    s = agent.new_session()
+    pref = {"kind": "email_pref", "value": "send it to jane.doe@work.com or call 650-555-0101"}
+    say(agent, s, nlu(memory_items=[pref]))
+    details = " ".join(e.detail for e in s.events)
+    assert "jane.doe@work.com" not in details and "650-555-0101" not in details

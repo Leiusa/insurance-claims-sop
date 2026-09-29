@@ -58,6 +58,7 @@ class ConsentState(BaseModel):
     checks: int = 0
     account_party_id: str | None = None  # account located from the policyholder's details; this is not access
     representative_on_file: bool = False
+    representative: str | None = None  # the listed representative this authorization is bound to
     explained: bool = False
 
 
@@ -78,6 +79,7 @@ class Session(BaseModel):
     memory: list[MemoryItem] = []
     candidate_case_ids: list[str] = []
     active_case_id: str | None = None
+    left_case_id: str | None = None  # the claim the caller just asked to move away from
     discussed: dict[str, list[str]] = {}  # case_id -> topics covered, in order
     deadline_caveat_given: list[str] = []
     counters: Counters = Field(default_factory=Counters)

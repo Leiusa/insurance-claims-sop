@@ -38,7 +38,7 @@ reply + audit events (operator panel)
 
 The LLM never calls tools. It proposes actions through the NLU output, for example a selected case or a request for a human. The engine carries them out through a single tool gateway. The gateway checks the current phase's allowlist and each tool's preconditions, for example `claim.party_id == session.verified_party_id`. The party ID always comes from the session, never from model output. Denied calls are logged and never executed.
 
-Failures: if the NLU returns invalid JSON, it is retried once; after that the turn is treated as an empty extraction, with no state change and no phase advance. If the output guard rejects a reply, it is regenerated once, then replaced by a deterministic template.
+Failures: if the NLU call fails or returns invalid JSON, it is retried once. If it still fails, the turn ends before any state update (no identity, consent, counter or phase change) and a fixed reply asks the caller to repeat. If the output guard rejects a reply, it is regenerated once, then replaced by a deterministic template.
 
 ## 3. Phase specs
 
@@ -46,8 +46,8 @@ Failures: if the NLU returns invalid JSON, it is retried once; after that the tu
 |---|---|---|---|---|
 | `VERIFY_ID` | transcript; which slot *types* were provided or refused; how many are still needed; the caller's own stated hints | `verify_identity` | **Scripted.** The engine decides what to ask; the LLM phrases it, empathizes and answers "why" questions. | Exactly one policyholder matches at least 3 distinct PII factors, with no contradictions |
 | `RESOLVE_INTENT` | the verified caller's claim index (id, type, filed date, status); memory | `list_claims`, `get_claim_facts` (ownership-checked) | **Guided.** The LLM maps messy references onto a closed candidate set. | Exactly one active case, or no claims at all (goes to `POST_PROCESS`) |
-| `PROCESS_CASE` | fact sheet for the active case (§8); memory | `get_claim`, `get_guidance`, `request_human` | **Open.** The LLM reasons freely over the fact sheet, but only over the fact sheet. | Caller is done → `POST_PROCESS`; another case → `RESOLVE_INTENT`; human → `ESCALATED` |
-| `POST_PROCESS` | structured session summary; masked on-file email | `send_email_summary` (requires explicit consent tied to this summary and recipient) | **Constrained.** Send or skip. | Sent or skipped → `ENDED`; more questions → `PROCESS_CASE` |
+| `PROCESS_CASE` | fact sheet for the active case (§8); memory | `get_claim_facts`, `list_claims`, `create_handoff` | **Open.** The LLM reasons freely over the fact sheet, but only over the fact sheet. | Caller is done → `POST_PROCESS`; another case → `RESOLVE_INTENT`; human → `ESCALATED` |
+| `POST_PROCESS` | structured session summary; masked on-file email | `build_summary`, `send_email_summary` (requires explicit consent in the same turn, once), `create_handoff` | **Constrained.** Send or skip. | Sent or skipped → `ENDED`; more questions → `PROCESS_CASE` |
 
 Terminal states are `ESCALATED` (a human handoff ticket was created) and `ENDED`. Global handlers run in every phase: out-of-scope questions, emotion, explicit requests for a human, and injection attempts.
 
@@ -121,7 +121,7 @@ The fact sheet for the active case contains:
 
 ## 9. `POST_PROCESS`: email summary
 
-- **Entry.** The phase starts when the caller is done. The LLM fills a fixed structure: what was discussed, claim status/outcome, and next steps. The structure is validated like any other output, rendered from a template, and previewed in the UI.
+- **Entry.** The phase starts when the caller is done. Code assembles the summary from the session record: claims discussed, their status/outcome, next steps, and the caller's own notes (document status, preferences). It is rendered from a template and previewed in the UI. A question asked in the same message as "send it" is answered first, and the email is offered again with the updated summary.
 - **Recipient.** Only the email on file, shown masked (`m*******@email.com`). A request for a different address is declined for privacy reasons, and the caller is pointed to the portal or a representative.
 - **Consent.** The summary is sent only on explicit consent to the pending offer. "Thanks" or "ok" counts as unclear: the agent asks once more, and if the answer is still unclear, nothing is sent. A skip takes effect immediately, with no persuasion. Each summary is sent at most once. In the demo, sending means an in-app outbox that is labelled as simulated.
 - **Earlier preference.** If the caller said earlier "email me the details", the offer mentions it, but consent is still confirmed here.
@@ -194,7 +194,7 @@ Not included in this demo: real email delivery, telephony, persistent sessions (
   - tool gateway denials, email consent rules, and the out-of-scope counter
   - multi-turn engine flows driven by scripted NLU outputs
 - **Live (real LLM):**
-  - scenario scripts that assert on state and events, never on wording
+  - scenario replays (`sop.cli`) that print replies and the audit trail for review; they are not automated assertions
   - a check that no claim data appears in any reply before verification
 
 ## 15. Trade-offs

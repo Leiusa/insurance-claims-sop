@@ -43,6 +43,9 @@ const EVENT_CLASS = {
   consent_checked: "k-warn",
   consent_timeout: "k-bad",
   representative_not_on_file: "k-bad",
+  representative_changed: "k-bad",
+  email_deferred: "k-warn",
+  caller_ended: "k-warn",
 };
 
 // ---------------------------------------------------------------- DOM helpers
@@ -401,6 +404,10 @@ function summaryText(summary) {
     lines.push(`• ${claim.status}`);
     if (claim.topics.length) lines.push(`  Topics: ${claim.topics.join(", ")}`);
   });
+  if (summary.caller_notes && summary.caller_notes.length) {
+    lines.push("", "What you told us:");
+    summary.caller_notes.forEach((note) => lines.push(`• ${note}`));
+  }
   lines.push("", "Next steps:");
   summary.next_steps.forEach((step) => lines.push(`• ${step}`));
   return lines.join("\n");
